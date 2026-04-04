@@ -303,34 +303,53 @@ function pointToSegmentDist(px, py, x1, y1, x2, y2) {
 }
 
 function douglasPeucker(points, tolerance) {
-  if (points.length <= 2) return points;
+  // Iterative DP using a stack — avoids deep recursion and excessive array slicing
+  const n = points.length;
+  if (n <= 2) return points;
 
-  let maxDist = 0, maxIdx = 0;
-  const [x1, y1] = points[0];
-  const [x2, y2] = points[points.length - 1];
+  const keep = new Uint8Array(n);
+  keep[0] = 1;
+  keep[n - 1] = 1;
+  const stack = [[0, n - 1]];
 
-  for (let i = 1; i < points.length - 1; i++) {
-    const d = pointToSegmentDist(points[i][0], points[i][1], x1, y1, x2, y2);
-    if (d > maxDist) { maxDist = d; maxIdx = i; }
+  while (stack.length > 0) {
+    const [start, end] = stack.pop();
+    if (end - start <= 1) continue;
+
+    let maxDist = 0, maxIdx = start;
+    const x1 = points[start][0], y1 = points[start][1];
+    const x2 = points[end][0], y2 = points[end][1];
+
+    for (let i = start + 1; i < end; i++) {
+      const d = pointToSegmentDist(points[i][0], points[i][1], x1, y1, x2, y2);
+      if (d > maxDist) { maxDist = d; maxIdx = i; }
+    }
+
+    if (maxDist > tolerance) {
+      keep[maxIdx] = 1;
+      stack.push([start, maxIdx], [maxIdx, end]);
+    }
   }
 
-  if (maxDist > tolerance) {
-    const left = douglasPeucker(points.slice(0, maxIdx + 1), tolerance);
-    const right = douglasPeucker(points.slice(maxIdx), tolerance);
-    return [...left.slice(0, -1), ...right];
-  }
-
-  return [points[0], points[points.length - 1]];
+  return points.filter((_, i) => keep[i]);
 }
 
 function simplifyClosedContour(points, tolerance) {
   if (points.length <= 4) return points;
 
-  // Split the closed contour at two distant points, simplify each half, recombine
-  const mid = Math.floor(points.length / 2);
+  // Find the two most distant points to use as split anchors
+  let bestDist = 0, splitA = 0, splitB = 0;
+  const step = Math.max(1, Math.floor(points.length / 50));
+  for (let i = 0; i < points.length; i += step) {
+    for (let j = i + Math.floor(points.length / 4); j < points.length; j += step) {
+      const d = (points[i][0] - points[j][0]) ** 2 + (points[i][1] - points[j][1]) ** 2;
+      if (d > bestDist) { bestDist = d; splitA = i; splitB = j; }
+    }
+  }
 
-  const half1 = points.slice(0, mid + 1);
-  const half2 = [...points.slice(mid), points[0]];
+  // Split into two halves at the most distant points
+  const half1 = points.slice(splitA, splitB + 1);
+  const half2 = [...points.slice(splitB), ...points.slice(0, splitA + 1)];
 
   const s1 = douglasPeucker(half1, tolerance);
   const s2 = douglasPeucker(half2, tolerance);
@@ -513,8 +532,8 @@ export async function processImage(imageFile, settings) {
   const palette = kMeansQuantize(blurredData.data, pxW * pxH, numColors);
   const quantPixels = applyPaletteToPixels(blurredData.data, pxW * pxH, palette);
 
-  // 3. Create cell grid — cellSize controls polygon granularity
-  const cellSize = Math.max(4, Math.round(4 + blurRadius * 3));
+  // 3. Create cell grid — fine grid for good contour fidelity
+  const cellSize = Math.max(2, Math.round(2 + blurRadius));
   const gridW = Math.ceil(pxW / cellSize);
   const gridH = Math.ceil(pxH / cellSize);
   const grid = createCellGrid(quantPixels, pxW, pxH, gridW, gridH, cellSize, palette);
@@ -522,13 +541,16 @@ export async function processImage(imageFile, settings) {
   // 4. Find connected regions via flood fill
   const { labels, regions } = findConnectedRegions(grid, gridW, gridH);
 
-  // 5. Merge tiny regions into neighbors
-  const minCells = Math.max(2, Math.round(2 + blurRadius));
+  // 5. Merge tiny regions — minimum piece ~0.3-1.0 sq inches depending on simplification
+  const minAreaPx = (0.3 + blurRadius * 0.08) * DPI * DPI;
+  const minCells = Math.max(3, Math.round(minAreaPx / (cellSize * cellSize)));
   mergeSmallRegions(labels, regions, grid, gridW, gridH, minCells);
   const activeRegions = regions.filter(r => r.cells.length > 0);
 
-  // 6. Extract polygon contours for each region
-  const dpTolerance = cellSize * (0.8 + blurRadius * 0.15);
+  // 6. Extract polygon contours — aggressive DP simplification for cuttable glass pieces
+  // Tolerance scales with image size so edges are smooth at any dimension
+  const minDim = Math.min(pxW, pxH);
+  const dpTolerance = minDim * (0.02 + blurRadius * 0.004);
   const polygonRegions = [];
 
   for (const region of activeRegions) {
