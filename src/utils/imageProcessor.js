@@ -20,7 +20,6 @@ function initKMeansPP(samples, k) {
 }
 
 function kMeansQuantize(data, numPixels, k) {
-  // Sample pixels for performance
   const sampleRate = Math.max(1, Math.floor(numPixels / 8000));
   const samples = [];
   for (let i = 0; i < numPixels; i += sampleRate) {
@@ -29,7 +28,6 @@ function kMeansQuantize(data, numPixels, k) {
       samples.push([data[idx], data[idx + 1], data[idx + 2]]);
     }
   }
-
   if (samples.length === 0) return [[128, 128, 128]];
 
   let centroids = initKMeansPP(samples, Math.min(k, samples.length));
@@ -38,7 +36,6 @@ function kMeansQuantize(data, numPixels, k) {
 
   for (let iter = 0; iter < 25; iter++) {
     let changed = false;
-    // Assign
     for (let i = 0; i < samples.length; i++) {
       let best = 0, bestD = Infinity;
       for (let j = 0; j < n; j++) {
@@ -49,7 +46,6 @@ function kMeansQuantize(data, numPixels, k) {
     }
     if (!changed) break;
 
-    // Update centroids
     const sums = Array.from({ length: n }, () => [0, 0, 0, 0]);
     for (let i = 0; i < samples.length; i++) {
       const c = assignments[i];
@@ -68,11 +64,10 @@ function kMeansQuantize(data, numPixels, k) {
       }
     }
   }
-
   return centroids;
 }
 
-function applyPalette(data, numPixels, palette) {
+function applyPaletteToPixels(data, numPixels, palette) {
   const out = new Uint8ClampedArray(numPixels * 4);
   for (let i = 0; i < numPixels; i++) {
     const idx = i * 4;
@@ -90,156 +85,396 @@ function applyPalette(data, numPixels, palette) {
   return out;
 }
 
-// ─── Edge Detection & Dilation ────────────────────────────────────────────────
+// ─── Cell Grid ────────────────────────────────────────────────────────────────
 
-function detectEdges(quantPixels, width, height) {
-  const edges = new Uint8Array(width * height);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      const r = quantPixels[idx], g = quantPixels[idx + 1], b = quantPixels[idx + 2];
-      // Check 4 neighbors
-      const neighbors = [
-        x > 0 ? (y * width + (x - 1)) * 4 : -1,
-        x < width - 1 ? (y * width + (x + 1)) * 4 : -1,
-        y > 0 ? ((y - 1) * width + x) * 4 : -1,
-        y < height - 1 ? ((y + 1) * width + x) * 4 : -1,
-      ];
-      for (const nIdx of neighbors) {
-        if (nIdx >= 0 && (quantPixels[nIdx] !== r || quantPixels[nIdx + 1] !== g || quantPixels[nIdx + 2] !== b)) {
-          edges[y * width + x] = 1;
-          break;
-        }
-      }
-    }
-  }
-  return edges;
-}
-
-function countRawEdgeSegments(quantPixels, width, height) {
-  let count = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = (y * width + x) * 4;
-      const r = quantPixels[idx], g = quantPixels[idx + 1], b = quantPixels[idx + 2];
-      if (x < width - 1) {
-        const ri = (y * width + x + 1) * 4;
-        if (quantPixels[ri] !== r || quantPixels[ri + 1] !== g || quantPixels[ri + 2] !== b) count++;
-      }
-      if (y < height - 1) {
-        const bi = ((y + 1) * width + x) * 4;
-        if (quantPixels[bi] !== r || quantPixels[bi + 1] !== g || quantPixels[bi + 2] !== b) count++;
-      }
-    }
-  }
-  return count;
-}
-
-function dilateEdges(edges, width, height, thickness) {
-  const result = new Uint8Array(width * height);
-  const r = Math.floor(thickness / 2);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (edges[y * width + x]) {
-        for (let dy = -r; dy <= r; dy++) {
-          for (let dx = -r; dx <= r; dx++) {
-            if (dx * dx + dy * dy <= r * r) {
-              const nx = x + dx, ny = y + dy;
-              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                result[ny * width + nx] = 1;
-              }
+function createCellGrid(quantPixels, pxW, pxH, gridW, gridH, cellSize, palette) {
+  const grid = new Int32Array(gridW * gridH);
+  for (let gy = 0; gy < gridH; gy++) {
+    for (let gx = 0; gx < gridW; gx++) {
+      const counts = new Int32Array(palette.length);
+      const x0 = gx * cellSize;
+      const y0 = gy * cellSize;
+      const x1 = Math.min(x0 + cellSize, pxW);
+      const y1 = Math.min(y0 + cellSize, pxH);
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0; px < x1; px++) {
+          const idx = (py * pxW + px) * 4;
+          const r = quantPixels[idx], g = quantPixels[idx + 1], b = quantPixels[idx + 2];
+          for (let p = 0; p < palette.length; p++) {
+            if (palette[p][0] === r && palette[p][1] === g && palette[p][2] === b) {
+              counts[p]++;
+              break;
             }
           }
         }
       }
+      let maxCount = 0, maxP = 0;
+      for (let p = 0; p < palette.length; p++) {
+        if (counts[p] > maxCount) { maxCount = counts[p]; maxP = p; }
+      }
+      grid[gy * gridW + gx] = maxP;
     }
   }
-  return result;
+  return grid;
 }
 
-// ─── Canvas Building ──────────────────────────────────────────────────────────
+// ─── Connected Regions (4-connectivity flood fill) ────────────────────────────
 
-function buildPatternCanvas(quantPixels, thickEdges, width, height, outlineOnly) {
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  const imgData = ctx.createImageData(width, height);
+function findConnectedRegions(grid, gridW, gridH) {
+  const labels = new Int32Array(gridW * gridH).fill(-1);
+  const regions = [];
+  let nextLabel = 0;
 
-  for (let i = 0; i < width * height; i++) {
-    const idx = i * 4;
-    if (thickEdges[i]) {
-      imgData.data[idx] = 20;
-      imgData.data[idx + 1] = 20;
-      imgData.data[idx + 2] = 20;
-      imgData.data[idx + 3] = 255;
-    } else if (outlineOnly) {
-      imgData.data[idx] = 255;
-      imgData.data[idx + 1] = 255;
-      imgData.data[idx + 2] = 255;
-      imgData.data[idx + 3] = 255;
-    } else {
-      imgData.data[idx] = quantPixels[idx];
-      imgData.data[idx + 1] = quantPixels[idx + 1];
-      imgData.data[idx + 2] = quantPixels[idx + 2];
-      imgData.data[idx + 3] = 255;
+  for (let i = 0; i < gridW * gridH; i++) {
+    if (labels[i] >= 0) continue;
+    const colorIdx = grid[i];
+    const label = nextLabel++;
+    const cells = [];
+    const queue = [i];
+    labels[i] = label;
+
+    while (queue.length > 0) {
+      const ci = queue.pop();
+      cells.push(ci);
+      const cx = ci % gridW;
+      const cy = (ci - cx) / gridW;
+      for (const [nx, ny] of [[cx - 1, cy], [cx + 1, cy], [cx, cy - 1], [cx, cy + 1]]) {
+        if (nx >= 0 && nx < gridW && ny >= 0 && ny < gridH) {
+          const ni = ny * gridW + nx;
+          if (labels[ni] < 0 && grid[ni] === colorIdx) {
+            labels[ni] = label;
+            queue.push(ni);
+          }
+        }
+      }
+    }
+    regions.push({ label, colorIdx, cells });
+  }
+  return { labels, regions };
+}
+
+// ─── Merge Small Regions ──────────────────────────────────────────────────────
+
+function mergeSmallRegions(labels, regions, grid, gridW, gridH, minCells) {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const region of regions) {
+      if (region.cells.length === 0 || region.cells.length >= minCells) continue;
+
+      const neighborCounts = {};
+      for (const ci of region.cells) {
+        const cx = ci % gridW;
+        const cy = (ci - cx) / gridW;
+        for (const [nx, ny] of [[cx - 1, cy], [cx + 1, cy], [cx, cy - 1], [cx, cy + 1]]) {
+          if (nx >= 0 && nx < gridW && ny >= 0 && ny < gridH) {
+            const ni = ny * gridW + nx;
+            if (labels[ni] !== region.label) {
+              neighborCounts[labels[ni]] = (neighborCounts[labels[ni]] || 0) + 1;
+            }
+          }
+        }
+      }
+
+      let bestNeighbor = -1, bestCount = 0;
+      for (const [nl, count] of Object.entries(neighborCounts)) {
+        if (parseInt(count) > bestCount) {
+          bestCount = parseInt(count);
+          bestNeighbor = parseInt(nl);
+        }
+      }
+      if (bestNeighbor < 0) continue;
+
+      const target = regions.find(r => r.label === bestNeighbor);
+      if (!target) continue;
+
+      for (const ci of region.cells) {
+        labels[ci] = bestNeighbor;
+        grid[ci] = target.colorIdx;
+        target.cells.push(ci);
+      }
+      region.cells = [];
+      changed = true;
+    }
+  }
+}
+
+// ─── Contour Extraction ───────────────────────────────────────────────────────
+
+function extractRegionContours(labels, gridW, gridH, regionLabel, cellSize, pxW, pxH) {
+  // Collect boundary edge segments in grid coordinates
+  const adj = new Map();
+
+  function addEdge(x1, y1, x2, y2) {
+    const k1 = `${x1},${y1}`;
+    const k2 = `${x2},${y2}`;
+    if (!adj.has(k1)) adj.set(k1, new Set());
+    if (!adj.has(k2)) adj.set(k2, new Set());
+    adj.get(k1).add(k2);
+    adj.get(k2).add(k1);
+  }
+
+  for (let gy = 0; gy < gridH; gy++) {
+    for (let gx = 0; gx < gridW; gx++) {
+      if (labels[gy * gridW + gx] !== regionLabel) continue;
+      // Top edge
+      if (gy === 0 || labels[(gy - 1) * gridW + gx] !== regionLabel) {
+        addEdge(gx, gy, gx + 1, gy);
+      }
+      // Bottom edge
+      if (gy === gridH - 1 || labels[(gy + 1) * gridW + gx] !== regionLabel) {
+        addEdge(gx, gy + 1, gx + 1, gy + 1);
+      }
+      // Left edge
+      if (gx === 0 || labels[gy * gridW + (gx - 1)] !== regionLabel) {
+        addEdge(gx, gy, gx, gy + 1);
+      }
+      // Right edge
+      if (gx === gridW - 1 || labels[gy * gridW + (gx + 1)] !== regionLabel) {
+        addEdge(gx + 1, gy, gx + 1, gy + 1);
+      }
     }
   }
 
-  ctx.putImageData(imgData, 0, 0);
-  return canvas;
+  // Trace contours by following edges
+  // For 4-connected regions, each boundary vertex has exactly 2 edges,
+  // so traversal is unambiguous.
+  const usedEdges = new Set();
+  const contours = [];
+
+  function edgeKey(k1, k2) {
+    return k1 < k2 ? `${k1}|${k2}` : `${k2}|${k1}`;
+  }
+
+  for (const [startKey, neighbors] of adj) {
+    for (const neighborKey of neighbors) {
+      const ek = edgeKey(startKey, neighborKey);
+      if (usedEdges.has(ek)) continue;
+
+      const contour = [];
+      let prevKey = null;
+      let currKey = startKey;
+      usedEdges.add(ek);
+      contour.push(startKey.split(',').map(Number));
+
+      let nextKey = neighborKey;
+      let safety = 0;
+
+      while (nextKey !== startKey && safety < 200000) {
+        safety++;
+        contour.push(nextKey.split(',').map(Number));
+        const currNeighbors = adj.get(nextKey);
+        let found = null;
+        for (const nk of currNeighbors) {
+          const nek = edgeKey(nextKey, nk);
+          if (!usedEdges.has(nek)) {
+            found = nk;
+            usedEdges.add(nek);
+            break;
+          }
+        }
+        if (!found) break;
+        prevKey = nextKey;
+        nextKey = found;
+      }
+
+      if (contour.length >= 3) {
+        // Convert grid coordinates to pixel coordinates
+        const pxContour = contour.map(([gx, gy]) => [
+          Math.min(gx * cellSize, pxW),
+          Math.min(gy * cellSize, pxH),
+        ]);
+        contours.push(pxContour);
+      }
+    }
+  }
+
+  return contours;
 }
 
-// ─── Material Estimates ───────────────────────────────────────────────────────
+// ─── Douglas-Peucker Simplification ──────────────────────────────────────────
 
-function calculateEstimates(quantPixels, thickEdges, palette, width, height, settings, dpi) {
+function pointToSegmentDist(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(px - x1, py - y1);
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+function douglasPeucker(points, tolerance) {
+  if (points.length <= 2) return points;
+
+  let maxDist = 0, maxIdx = 0;
+  const [x1, y1] = points[0];
+  const [x2, y2] = points[points.length - 1];
+
+  for (let i = 1; i < points.length - 1; i++) {
+    const d = pointToSegmentDist(points[i][0], points[i][1], x1, y1, x2, y2);
+    if (d > maxDist) { maxDist = d; maxIdx = i; }
+  }
+
+  if (maxDist > tolerance) {
+    const left = douglasPeucker(points.slice(0, maxIdx + 1), tolerance);
+    const right = douglasPeucker(points.slice(maxIdx), tolerance);
+    return [...left.slice(0, -1), ...right];
+  }
+
+  return [points[0], points[points.length - 1]];
+}
+
+function simplifyClosedContour(points, tolerance) {
+  if (points.length <= 4) return points;
+
+  // Split the closed contour at two distant points, simplify each half, recombine
+  const mid = Math.floor(points.length / 2);
+
+  const half1 = points.slice(0, mid + 1);
+  const half2 = [...points.slice(mid), points[0]];
+
+  const s1 = douglasPeucker(half1, tolerance);
+  const s2 = douglasPeucker(half2, tolerance);
+
+  const result = [...s1.slice(0, -1), ...s2.slice(0, -1)];
+  return result.length >= 3 ? result : points;
+}
+
+// ─── SVG Building ─────────────────────────────────────────────────────────────
+
+function contourToSVGPath(contour) {
+  if (contour.length < 3) return '';
+  return `M ${contour[0][0]} ${contour[0][1]} ` +
+    contour.slice(1).map(([x, y]) => `L ${x} ${y}`).join(' ') +
+    ' Z';
+}
+
+function buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, outlineOnly) {
+  const strokeW = Math.max(1, lineThickness);
+  let paths = '';
+
+  // Draw a white background
+  paths += `<rect x="0" y="0" width="${pxW}" height="${pxH}" fill="${outlineOnly ? 'white' : '#f5f5f5'}" />\n`;
+
+  for (const region of polygonRegions) {
+    const [r, g, b] = palette[region.colorIdx];
+    const fill = outlineOnly ? 'white' : `rgb(${r},${g},${b})`;
+
+    for (const contour of region.contours) {
+      const d = contourToSVGPath(contour);
+      if (d) {
+        paths += `  <path d="${d}" fill="${fill}" stroke="#1a1a1a" stroke-width="${strokeW}" stroke-linejoin="round" />\n`;
+      }
+    }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${pxW}" height="${pxH}" viewBox="0 0 ${pxW} ${pxH}">\n${paths}</svg>`;
+}
+
+// ─── SVG to Canvas ────────────────────────────────────────────────────────────
+
+function svgToCanvas(svgString, width, height) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const blob = new Blob([svgString], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(url);
+      resolve(canvas);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      // Fallback: return empty canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      resolve(canvas);
+    };
+    img.src = url;
+  });
+}
+
+// ─── Polygon-based Material Estimates ─────────────────────────────────────────
+
+function polygonArea(contour) {
+  // Shoelace formula (returns signed area)
+  let area = 0;
+  for (let i = 0; i < contour.length; i++) {
+    const j = (i + 1) % contour.length;
+    area += contour[i][0] * contour[j][1];
+    area -= contour[j][0] * contour[i][1];
+  }
+  return area / 2;
+}
+
+function polygonPerimeter(contour) {
+  let perim = 0;
+  for (let i = 0; i < contour.length; i++) {
+    const j = (i + 1) % contour.length;
+    perim += Math.hypot(contour[j][0] - contour[i][0], contour[j][1] - contour[i][1]);
+  }
+  return perim;
+}
+
+function calculatePolygonEstimates(polygonRegions, palette, settings, pxW, pxH, dpi) {
   const { wastePercent, units } = settings;
-  const totalPixels = width * height;
   const wasteFactor = 1 + (wastePercent || 15) / 100;
-
-  // Area in square inches
   const widthIn = units === 'in' ? settings.width : settings.width / 2.54;
   const heightIn = units === 'in' ? settings.height : settings.height / 2.54;
-  const totalAreaIn = widthIn * heightIn;
+  const pxToIn = widthIn / pxW; // pixel to inch conversion
+  const pxToInSq = pxToIn * pxToIn;
 
-  // Count non-edge pixels per palette color
-  const colorCounts = new Array(palette.length).fill(0);
-  let nonEdgeTotal = 0;
-  for (let i = 0; i < totalPixels; i++) {
-    if (!thickEdges[i]) {
-      const idx = i * 4;
-      const r = quantPixels[idx], g = quantPixels[idx + 1], b = quantPixels[idx + 2];
-      let best = 0, bestD = Infinity;
-      for (let j = 0; j < palette.length; j++) {
-        const d = colorDistSq([r, g, b], palette[j]);
-        if (d < bestD) { bestD = d; best = j; }
-      }
-      colorCounts[best]++;
-      nonEdgeTotal++;
+  const colorAreas = {};
+  let totalInteriorPerimPx = 0;
+  let pieceCount = 0;
+
+  for (const region of polygonRegions) {
+    const key = region.colorIdx;
+    let regionAreaPx = 0;
+    let regionPerimPx = 0;
+
+    for (const contour of region.contours) {
+      regionAreaPx += Math.abs(polygonArea(contour));
+      regionPerimPx += polygonPerimeter(contour);
     }
+
+    totalInteriorPerimPx += regionPerimPx;
+    pieceCount++;
+
+    if (!colorAreas[key]) colorAreas[key] = 0;
+    colorAreas[key] += regionAreaPx;
   }
 
-  const glassByColor = palette.map(([r, g, b], i) => {
-    const fraction = nonEdgeTotal > 0 ? colorCounts[i] / nonEdgeTotal : 0;
-    const areaIn = fraction * totalAreaIn * wasteFactor;
-    return { r, g, b, areaIn, areaSqFt: areaIn / 144, fraction };
-  }).filter(c => c.areaIn > 0.5).sort((a, b) => b.areaIn - a.areaIn);
+  const totalAreaIn = widthIn * heightIn;
+  const perimeterIn = 2 * (widthIn + heightIn);
+
+  const glassByColor = Object.entries(colorAreas)
+    .map(([colorIdxStr, areaPx]) => {
+      const colorIdx = parseInt(colorIdxStr);
+      const [r, g, b] = palette[colorIdx];
+      const areaIn = areaPx * pxToInSq * wasteFactor;
+      const fraction = areaPx * pxToInSq / totalAreaIn;
+      return { r, g, b, areaIn, areaSqFt: areaIn / 144, fraction };
+    })
+    .filter(c => c.areaIn > 0.5)
+    .sort((a, b) => b.areaIn - a.areaIn);
 
   const totalGlassSqFt = glassByColor.reduce((s, c) => s + c.areaSqFt, 0);
 
-  // Came length: count edge boundary segments
-  const boundarySegments = countRawEdgeSegments(quantPixels, width, height);
-  // Add perimeter
-  const perimeterIn = 2 * (widthIn + heightIn);
-  const cameLengthIn = (boundarySegments / dpi) + perimeterIn;
+  // Interior came: half the total perimeter of all polygons (each edge shared by 2 regions)
+  // minus the outer perimeter which isn't shared
+  const totalPerimIn = totalInteriorPerimPx * pxToIn;
+  const interiorCameIn = (totalPerimIn - perimeterIn) / 2;
+  const cameLengthIn = interiorCameIn + perimeterIn;
   const cameLengthFt = cameLengthIn / 12;
-
-  // Solder: ~1 lb per 8 linear feet of came
-  const solderLbs = cameLengthFt / 8;
-
-  // Came: U-channel for perimeter, H-channel for interior
-  const interiorCameFt = (cameLengthIn - perimeterIn) / 12;
+  const interiorCameFt = Math.max(0, interiorCameIn) / 12;
   const perimeterCameFt = perimeterIn / 12;
+
+  const solderLbs = cameLengthFt / 8;
 
   return {
     glassTotal: { value: totalGlassSqFt.toFixed(2), unit: 'sq ft' },
@@ -249,7 +484,7 @@ function calculateEstimates(quantPixels, thickEdges, palette, width, height, set
     perimeterCame: { value: perimeterCameFt.toFixed(1), unit: 'linear ft' },
     solderWeight: { value: solderLbs.toFixed(2), unit: 'lbs (50/50)' },
     totalArea: { value: totalAreaIn.toFixed(1), unit: 'sq in' },
-    numPieces: glassByColor.length,
+    numPieces: pieceCount,
   };
 }
 
@@ -262,42 +497,70 @@ export async function processImage(imageFile, settings) {
   const pxW = Math.round((units === 'in' ? width : width / 2.54) * DPI);
   const pxH = Math.round((units === 'in' ? height : height / 2.54) * DPI);
 
-  // Load image
+  // 1. Load and blur image
   const bitmap = await createImageBitmap(imageFile);
-
-  // Draw with blur using canvas filter (GPU-accelerated)
   const workCanvas = document.createElement('canvas');
   workCanvas.width = pxW;
   workCanvas.height = pxH;
   const ctx = workCanvas.getContext('2d');
-
   const blurPx = Math.round(blurRadius * 6);
-  if (blurPx > 0) {
-    ctx.filter = `blur(${blurPx}px)`;
-  }
+  if (blurPx > 0) ctx.filter = `blur(${blurPx}px)`;
   ctx.drawImage(bitmap, 0, 0, pxW, pxH);
   ctx.filter = 'none';
-
   const blurredData = ctx.getImageData(0, 0, pxW, pxH);
 
-  // Quantize colors
+  // 2. Quantize pixel colors
   const palette = kMeansQuantize(blurredData.data, pxW * pxH, numColors);
+  const quantPixels = applyPaletteToPixels(blurredData.data, pxW * pxH, palette);
 
-  // Apply palette to every pixel
-  const quantPixels = applyPalette(blurredData.data, pxW * pxH, palette);
+  // 3. Create cell grid — cellSize controls polygon granularity
+  const cellSize = Math.max(4, Math.round(4 + blurRadius * 3));
+  const gridW = Math.ceil(pxW / cellSize);
+  const gridH = Math.ceil(pxH / cellSize);
+  const grid = createCellGrid(quantPixels, pxW, pxH, gridW, gridH, cellSize, palette);
 
-  // Edge detection + dilation
-  const rawEdges = detectEdges(quantPixels, pxW, pxH);
-  const thickEdges = lineThickness > 1
-    ? dilateEdges(rawEdges, pxW, pxH, lineThickness)
-    : rawEdges;
+  // 4. Find connected regions via flood fill
+  const { labels, regions } = findConnectedRegions(grid, gridW, gridH);
 
-  // Build output canvases
-  const patternCanvas = buildPatternCanvas(quantPixels, thickEdges, pxW, pxH, false);
-  const outlineCanvas = buildPatternCanvas(quantPixels, thickEdges, pxW, pxH, true);
+  // 5. Merge tiny regions into neighbors
+  const minCells = Math.max(2, Math.round(2 + blurRadius));
+  mergeSmallRegions(labels, regions, grid, gridW, gridH, minCells);
+  const activeRegions = regions.filter(r => r.cells.length > 0);
 
-  // Material estimates
-  const estimates = calculateEstimates(quantPixels, thickEdges, palette, pxW, pxH, settings, DPI);
+  // 6. Extract polygon contours for each region
+  const dpTolerance = cellSize * (0.8 + blurRadius * 0.15);
+  const polygonRegions = [];
 
-  return { patternCanvas, outlineCanvas, estimates, palette, pxW, pxH, DPI };
+  for (const region of activeRegions) {
+    const contours = extractRegionContours(labels, gridW, gridH, region.label, cellSize, pxW, pxH);
+    const simplified = contours.map(c => simplifyClosedContour(c, dpTolerance));
+    polygonRegions.push({
+      colorIdx: region.colorIdx,
+      contours: simplified,
+      cellCount: region.cells.length,
+    });
+  }
+
+  // 7. Build SVG strings
+  const svgColored = buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, false);
+  const svgOutline = buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, true);
+
+  // 8. Convert SVG to canvas for preview and PDF export
+  const patternCanvas = await svgToCanvas(svgColored, pxW, pxH);
+  const outlineCanvas = await svgToCanvas(svgOutline, pxW, pxH);
+
+  // 9. Calculate material estimates from polygon geometry
+  const estimates = calculatePolygonEstimates(polygonRegions, palette, settings, pxW, pxH, DPI);
+
+  return {
+    patternCanvas,
+    outlineCanvas,
+    svgColored,
+    svgOutline,
+    estimates,
+    palette,
+    pxW,
+    pxH,
+    DPI,
+  };
 }

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { exportColoredPDF, exportOutlinePDF, exportPNG } from '../utils/pdfExporter.js';
+import { exportColoredPDF, exportOutlinePDF, exportPNG, exportSVG } from '../utils/pdfExporter.js';
 
 function ExportButton({ label, description, icon, onClick, disabled, loading }) {
   return (
@@ -73,6 +73,24 @@ export default function ExportPanel({ result, settings }) {
           loading={loading === 'png-outline'}
           disabled={disabled}
           onClick={() => run('png-outline', () => exportPNG(result.outlineCanvas, 'stained-glass-outline.png'))}
+        />
+
+        <ExportButton
+          icon="📐"
+          label="Download Pattern (SVG)"
+          description="Scalable vector — ideal for precise tracing and resizing."
+          loading={loading === 'svg-color'}
+          disabled={disabled || !result?.svgColored}
+          onClick={() => run('svg-color', () => exportSVG(result.svgColored, 'stained-glass-pattern.svg'))}
+        />
+
+        <ExportButton
+          icon="📏"
+          label="Download Cutting Guide (SVG)"
+          description="Vector outline — scale to any size without quality loss."
+          loading={loading === 'svg-outline'}
+          disabled={disabled || !result?.svgOutline}
+          onClick={() => run('svg-outline', () => exportSVG(result.svgOutline, 'stained-glass-outline.svg'))}
         />
       </div>
 
