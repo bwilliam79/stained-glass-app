@@ -199,10 +199,87 @@ function mergeSmallRegions(labels, regions, grid, gridW, gridH, minCells) {
   }
 }
 
+// ─── Eliminate Thin / Elongated Regions ──────────────────────────────────────
+// Uses PCA on grid cell coordinates to find approximate minimum width.
+// For a region of uniform width W cells, PCA gives approxMinWidth ≈ 0.577 * W.
+// We eliminate regions where the actual minimum width (in pixels) < minCutWidthPx.
+
+function eliminateThinRegions(labels, regions, grid, gridW, gridH, cellSize, minCutWidthPx) {
+  // Convert minCutWidthPx to PCA threshold in cell units
+  // approxMinWidth (cells) < minCutWidthPx * 0.577 / cellSize → too thin
+  const pcaThreshold = minCutWidthPx * 0.577 / cellSize;
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const region of regions) {
+      if (region.cells.length < 4) continue;
+
+      // Compute PCA minimum width
+      const n = region.cells.length;
+      const xs = region.cells.map(ci => ci % gridW);
+      const ys = region.cells.map(ci => Math.floor(ci / gridW));
+
+      let sumX = 0, sumY = 0;
+      for (let i = 0; i < n; i++) { sumX += xs[i]; sumY += ys[i]; }
+      const mx = sumX / n, my = sumY / n;
+
+      let cxx = 0, cyy = 0, cxy = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = xs[i] - mx, dy = ys[i] - my;
+        cxx += dx * dx; cyy += dy * dy; cxy += dx * dy;
+      }
+      cxx /= n; cyy /= n; cxy /= n;
+
+      const trace = cxx + cyy;
+      const det = cxx * cyy - cxy * cxy;
+      const disc = Math.sqrt(Math.max(0, trace * trace / 4 - det));
+      const minEig = Math.max(0, trace / 2 - disc);
+      const approxMinWidth = Math.sqrt(minEig) * 2; // in cell units
+
+      if (approxMinWidth >= pcaThreshold) continue;
+
+      // Too thin — merge with largest neighbor
+      const neighborCounts = {};
+      for (const ci of region.cells) {
+        const cx = ci % gridW;
+        const cy = Math.floor(ci / gridW);
+        for (const [nx, ny] of [[cx-1,cy],[cx+1,cy],[cx,cy-1],[cx,cy+1]]) {
+          if (nx >= 0 && nx < gridW && ny >= 0 && ny < gridH) {
+            const ni = ny * gridW + nx;
+            if (labels[ni] !== region.label) {
+              neighborCounts[labels[ni]] = (neighborCounts[labels[ni]] || 0) + 1;
+            }
+          }
+        }
+      }
+
+      let bestNeighbor = -1, bestCount = 0;
+      for (const [nl, count] of Object.entries(neighborCounts)) {
+        if (parseInt(count) > bestCount) {
+          bestCount = parseInt(count);
+          bestNeighbor = parseInt(nl);
+        }
+      }
+      if (bestNeighbor < 0) continue;
+
+      const target = regions.find(r => r.label === bestNeighbor);
+      if (!target) continue;
+
+      for (const ci of region.cells) {
+        labels[ci] = bestNeighbor;
+        grid[ci] = target.colorIdx;
+        target.cells.push(ci);
+      }
+      region.cells = [];
+      changed = true;
+    }
+  }
+}
+
 // ─── Contour Extraction ───────────────────────────────────────────────────────
 
 function extractRegionContours(labels, gridW, gridH, regionLabel, cellSize, pxW, pxH) {
-  // Collect boundary edge segments in grid coordinates
   const adj = new Map();
 
   function addEdge(x1, y1, x2, y2) {
@@ -217,28 +294,13 @@ function extractRegionContours(labels, gridW, gridH, regionLabel, cellSize, pxW,
   for (let gy = 0; gy < gridH; gy++) {
     for (let gx = 0; gx < gridW; gx++) {
       if (labels[gy * gridW + gx] !== regionLabel) continue;
-      // Top edge
-      if (gy === 0 || labels[(gy - 1) * gridW + gx] !== regionLabel) {
-        addEdge(gx, gy, gx + 1, gy);
-      }
-      // Bottom edge
-      if (gy === gridH - 1 || labels[(gy + 1) * gridW + gx] !== regionLabel) {
-        addEdge(gx, gy + 1, gx + 1, gy + 1);
-      }
-      // Left edge
-      if (gx === 0 || labels[gy * gridW + (gx - 1)] !== regionLabel) {
-        addEdge(gx, gy, gx, gy + 1);
-      }
-      // Right edge
-      if (gx === gridW - 1 || labels[gy * gridW + (gx + 1)] !== regionLabel) {
-        addEdge(gx + 1, gy, gx + 1, gy + 1);
-      }
+      if (gy === 0 || labels[(gy - 1) * gridW + gx] !== regionLabel) addEdge(gx, gy, gx + 1, gy);
+      if (gy === gridH - 1 || labels[(gy + 1) * gridW + gx] !== regionLabel) addEdge(gx, gy + 1, gx + 1, gy + 1);
+      if (gx === 0 || labels[gy * gridW + (gx - 1)] !== regionLabel) addEdge(gx, gy, gx, gy + 1);
+      if (gx === gridW - 1 || labels[gy * gridW + (gx + 1)] !== regionLabel) addEdge(gx + 1, gy, gx + 1, gy + 1);
     }
   }
 
-  // Trace contours by following edges
-  // For 4-connected regions, each boundary vertex has exactly 2 edges,
-  // so traversal is unambiguous.
   const usedEdges = new Set();
   const contours = [];
 
@@ -252,7 +314,6 @@ function extractRegionContours(labels, gridW, gridH, regionLabel, cellSize, pxW,
       if (usedEdges.has(ek)) continue;
 
       const contour = [];
-      let prevKey = null;
       let currKey = startKey;
       usedEdges.add(ek);
       contour.push(startKey.split(',').map(Number));
@@ -274,12 +335,10 @@ function extractRegionContours(labels, gridW, gridH, regionLabel, cellSize, pxW,
           }
         }
         if (!found) break;
-        prevKey = nextKey;
         nextKey = found;
       }
 
       if (contour.length >= 3) {
-        // Convert grid coordinates to pixel coordinates
         const pxContour = contour.map(([gx, gy]) => [
           Math.min(gx * cellSize, pxW),
           Math.min(gy * cellSize, pxH),
@@ -303,7 +362,6 @@ function pointToSegmentDist(px, py, x1, y1, x2, y2) {
 }
 
 function douglasPeucker(points, tolerance) {
-  // Iterative DP using a stack — avoids deep recursion and excessive array slicing
   const n = points.length;
   if (n <= 2) return points;
 
@@ -337,7 +395,6 @@ function douglasPeucker(points, tolerance) {
 function simplifyClosedContour(points, tolerance) {
   if (points.length <= 4) return points;
 
-  // Find the two most distant points to use as split anchors
   let bestDist = 0, splitA = 0, splitB = 0;
   const step = Math.max(1, Math.floor(points.length / 50));
   for (let i = 0; i < points.length; i += step) {
@@ -347,7 +404,6 @@ function simplifyClosedContour(points, tolerance) {
     }
   }
 
-  // Split into two halves at the most distant points
   const half1 = points.slice(splitA, splitB + 1);
   const half2 = [...points.slice(splitB), ...points.slice(0, splitA + 1)];
 
@@ -356,6 +412,129 @@ function simplifyClosedContour(points, tolerance) {
 
   const result = [...s1.slice(0, -1), ...s2.slice(0, -1)];
   return result.length >= 3 ? result : points;
+}
+
+// ─── Fix Acute Angles ─────────────────────────────────────────────────────────
+// Bevels any polygon vertex with an interior angle < minAngleDeg by replacing
+// the sharp point with a short flat edge. Sharp points crack when scored on glass.
+
+function fixAcuteAngles(points, minAngleDeg) {
+  if (points.length <= 3) return points;
+  const minAngleRad = minAngleDeg * Math.PI / 180;
+  const n = points.length;
+  const result = [];
+
+  for (let i = 0; i < n; i++) {
+    const prev = points[(i - 1 + n) % n];
+    const curr = points[i];
+    const next = points[(i + 1) % n];
+
+    const dx1 = prev[0] - curr[0], dy1 = prev[1] - curr[1];
+    const dx2 = next[0] - curr[0], dy2 = next[1] - curr[1];
+    const len1 = Math.hypot(dx1, dy1);
+    const len2 = Math.hypot(dx2, dy2);
+
+    if (len1 < 0.001 || len2 < 0.001) { result.push(curr); continue; }
+
+    const cosAngle = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
+    const angle = Math.acos(Math.max(-1, Math.min(1, cosAngle)));
+
+    if (angle < minAngleRad) {
+      // Replace sharp vertex with two bevel points
+      const bevelDist = Math.min(len1, len2) * 0.35;
+      result.push([curr[0] + (dx1 / len1) * bevelDist, curr[1] + (dy1 / len1) * bevelDist]);
+      result.push([curr[0] + (dx2 / len2) * bevelDist, curr[1] + (dy2 / len2) * bevelDist]);
+    } else {
+      result.push(curr);
+    }
+  }
+
+  return result.length >= 3 ? result : points;
+}
+
+// ─── Polygon Inset (Came Compensation) ───────────────────────────────────────
+// Each glass piece must be cut slightly smaller than the pattern to account for
+// the lead came heart occupying space between pieces.
+// Inset = came_heart_width / 2 per edge.
+
+function lineIntersect(x1, y1, x2, y2, x3, y3, x4, y4) {
+  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(denom) < 0.001) return null;
+  const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+  return [x1 + t * (x2 - x1), y1 + t * (y2 - y1)];
+}
+
+function insetPolygon(points, insetPx) {
+  if (insetPx <= 0 || points.length < 3) return points;
+
+  // Determine winding via signed area (SVG y-down coords)
+  let area = 0;
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area += points[i][0] * points[j][1] - points[j][0] * points[i][1];
+  }
+  // Positive area (y-down) = CW winding; inward normal = right of edge direction
+  const sign = area >= 0 ? 1 : -1;
+
+  // Offset each edge inward
+  const offsetEdges = [];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const dx = points[j][0] - points[i][0];
+    const dy = points[j][1] - points[i][1];
+    const len = Math.hypot(dx, dy);
+    if (len < 0.001) continue;
+    const nx = sign * dy / len;
+    const ny = -sign * dx / len;
+    offsetEdges.push([
+      points[i][0] + nx * insetPx, points[i][1] + ny * insetPx,
+      points[j][0] + nx * insetPx, points[j][1] + ny * insetPx,
+    ]);
+  }
+  if (offsetEdges.length < 3) return points;
+
+  // Find intersections of consecutive offset edges to get new vertices
+  const result = [];
+  for (let i = 0; i < offsetEdges.length; i++) {
+    const e1 = offsetEdges[i];
+    const e2 = offsetEdges[(i + 1) % offsetEdges.length];
+    const p = lineIntersect(e1[0], e1[1], e1[2], e1[3], e2[0], e2[1], e2[2], e2[3]);
+    result.push(p || [e1[2], e1[3]]);
+  }
+
+  // Validate: if winding flipped or polygon collapsed, return original
+  let newArea = 0;
+  for (let i = 0; i < result.length; i++) {
+    const j = (i + 1) % result.length;
+    newArea += result[i][0] * result[j][1] - result[j][0] * result[i][1];
+  }
+  if (result.length < 3 || newArea * area < 0 || Math.abs(newArea) < Math.abs(area) * 0.1) {
+    return points;
+  }
+
+  return result;
+}
+
+// ─── Polygon Centroid ─────────────────────────────────────────────────────────
+
+function polygonCentroid(contour) {
+  let cx = 0, cy = 0, area = 0;
+  const n = contour.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const cross = contour[i][0] * contour[j][1] - contour[j][0] * contour[i][1];
+    cx += (contour[i][0] + contour[j][0]) * cross;
+    cy += (contour[i][1] + contour[j][1]) * cross;
+    area += cross;
+  }
+  if (Math.abs(area) < 0.001) {
+    return [
+      contour.reduce((s, p) => s + p[0], 0) / n,
+      contour.reduce((s, p) => s + p[1], 0) / n,
+    ];
+  }
+  return [cx / (3 * area), cy / (3 * area)];
 }
 
 // ─── SVG Building ─────────────────────────────────────────────────────────────
@@ -371,15 +550,12 @@ function buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, outlineOnly)
   const strokeW = Math.max(1, lineThickness);
   let paths = '';
 
-  // Draw a white background
   paths += `<rect x="0" y="0" width="${pxW}" height="${pxH}" fill="${outlineOnly ? 'white' : '#f5f5f5'}" />\n`;
 
-  // Pass 1: Draw fills with a fill-colored stroke to eliminate anti-aliasing gaps
-  // The slightly wider fill-colored stroke creates overlap between adjacent regions
+  // Pass 1: Fill with fill-colored stroke to eliminate anti-aliasing gaps
   for (const region of polygonRegions) {
     const [r, g, b] = palette[region.colorIdx];
     const fill = outlineOnly ? 'white' : `rgb(${r},${g},${b})`;
-
     for (const contour of region.contours) {
       const d = contourToSVGPath(contour);
       if (d) {
@@ -388,7 +564,7 @@ function buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, outlineOnly)
     }
   }
 
-  // Pass 2: Draw the visible outlines on top
+  // Pass 2: Draw outlines on top
   for (const region of polygonRegions) {
     for (const contour of region.contours) {
       const d = contourToSVGPath(contour);
@@ -396,6 +572,18 @@ function buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, outlineOnly)
         paths += `  <path d="${d}" fill="none" stroke="#1a1a1a" stroke-width="${strokeW}" stroke-linejoin="round" />\n`;
       }
     }
+  }
+
+  // Pass 3: Piece number labels at centroids
+  for (const region of polygonRegions) {
+    if (!region.centroid || !region.pieceNumber) continue;
+    const [cx, cy] = region.centroid;
+    const area = region.contours.reduce((s, c) => s + Math.abs(polygonArea(c)), 0);
+    const fontSize = Math.max(8, Math.min(20, Math.sqrt(area) / 6));
+    paths += `  <text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" ` +
+      `text-anchor="middle" dominant-baseline="central" ` +
+      `font-family="Arial,Helvetica,sans-serif" font-size="${fontSize.toFixed(1)}" font-weight="bold" ` +
+      `fill="white" stroke="#1a1a1a" stroke-width="2.5" paint-order="stroke">${region.pieceNumber}</text>\n`;
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${pxW}" height="${pxH}" viewBox="0 0 ${pxW} ${pxH}">\n${paths}</svg>`;
@@ -419,7 +607,6 @@ function svgToCanvas(svgString, width, height) {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      // Fallback: return empty canvas
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
@@ -432,7 +619,6 @@ function svgToCanvas(svgString, width, height) {
 // ─── Polygon-based Material Estimates ─────────────────────────────────────────
 
 function polygonArea(contour) {
-  // Shoelace formula (returns signed area)
   let area = 0;
   for (let i = 0; i < contour.length; i++) {
     const j = (i + 1) % contour.length;
@@ -451,12 +637,12 @@ function polygonPerimeter(contour) {
   return perim;
 }
 
-function calculatePolygonEstimates(polygonRegions, palette, settings, pxW, pxH, dpi) {
+function calculatePolygonEstimates(polygonRegions, palette, colorLetters, settings, pxW, pxH) {
   const { wastePercent, units } = settings;
   const wasteFactor = 1 + (wastePercent || 15) / 100;
   const widthIn = units === 'in' ? settings.width : settings.width / 2.54;
   const heightIn = units === 'in' ? settings.height : settings.height / 2.54;
-  const pxToIn = widthIn / pxW; // pixel to inch conversion
+  const pxToIn = widthIn / pxW;
   const pxToInSq = pxToIn * pxToIn;
 
   const colorAreas = {};
@@ -489,15 +675,14 @@ function calculatePolygonEstimates(polygonRegions, palette, settings, pxW, pxH, 
       const [r, g, b] = palette[colorIdx];
       const areaIn = areaPx * pxToInSq * wasteFactor;
       const fraction = areaPx * pxToInSq / totalAreaIn;
-      return { r, g, b, areaIn, areaSqFt: areaIn / 144, fraction };
+      const colorLetter = colorLetters[colorIdx] || String.fromCharCode(65 + colorIdx);
+      return { r, g, b, areaIn, areaSqFt: areaIn / 144, fraction, colorLetter };
     })
     .filter(c => c.areaIn > 0.5)
     .sort((a, b) => b.areaIn - a.areaIn);
 
   const totalGlassSqFt = glassByColor.reduce((s, c) => s + c.areaSqFt, 0);
 
-  // Interior came: half the total perimeter of all polygons (each edge shared by 2 regions)
-  // minus the outer perimeter which isn't shared
   const totalPerimIn = totalInteriorPerimPx * pxToIn;
   const interiorCameIn = (totalPerimIn - perimeterIn) / 2;
   const cameLengthIn = interiorCameIn + perimeterIn;
@@ -523,6 +708,7 @@ function calculatePolygonEstimates(polygonRegions, palette, settings, pxW, pxH, 
 
 export async function processImage(imageFile, settings) {
   const { width, height, units, numColors, blurRadius, lineThickness } = settings;
+  const cameWidth = settings.cameWidth !== undefined ? settings.cameWidth : 0.1875;
   const DPI = 72;
 
   const pxW = Math.round((units === 'in' ? width : width / 2.54) * DPI);
@@ -544,7 +730,7 @@ export async function processImage(imageFile, settings) {
   const palette = kMeansQuantize(blurredData.data, pxW * pxH, numColors);
   const quantPixels = applyPaletteToPixels(blurredData.data, pxW * pxH, palette);
 
-  // 3. Create cell grid — fine grid for good contour fidelity
+  // 3. Create cell grid
   const cellSize = Math.max(2, Math.round(2 + blurRadius * 0.3));
   const gridW = Math.ceil(pxW / cellSize);
   const gridH = Math.ceil(pxH / cellSize);
@@ -553,37 +739,74 @@ export async function processImage(imageFile, settings) {
   // 4. Find connected regions via flood fill
   const { labels, regions } = findConnectedRegions(grid, gridW, gridH);
 
-  // 5. Merge only truly tiny regions (noise fragments), preserve design features
+  // 5. Merge tiny noise fragments
   const minCells = Math.max(3, Math.round(5 + blurRadius * 1));
   mergeSmallRegions(labels, regions, grid, gridW, gridH, minCells);
+
+  // 6. Eliminate thin/elongated regions that can't be cut in glass
+  const minCutWidthPx = 0.375 * DPI; // 0.375" minimum cuttable width
+  eliminateThinRegions(labels, regions, grid, gridW, gridH, cellSize, minCutWidthPx);
+
   const activeRegions = regions.filter(r => r.cells.length > 0);
 
-  // 6. Extract polygon contours — gentle DP simplification
-  // Smooths staircase edges into straight lines while preserving shape detail
+  // 7. Extract contours, simplify, fix acute angles, compute insets + centroids
   const minDim = Math.min(pxW, pxH);
   const dpTolerance = minDim * (0.006 + blurRadius * 0.001);
+  const cameInsetPx = (cameWidth / 2) * DPI; // half the came heart width in pixels
+
   const polygonRegions = [];
 
   for (const region of activeRegions) {
     const contours = extractRegionContours(labels, gridW, gridH, region.label, cellSize, pxW, pxH);
-    const simplified = contours.map(c => simplifyClosedContour(c, dpTolerance));
+    if (contours.length === 0) continue;
+
+    // DP simplify → fix acute angles
+    const simplified = contours.map(c => {
+      const dp = simplifyClosedContour(c, dpTolerance);
+      return fixAcuteAngles(dp, 30); // bevel any angle < 30°
+    });
+
+    // Came compensation: inset each contour by half the came heart width
+    const insetContours = simplified.map(c => insetPolygon(c, cameInsetPx));
+
+    // Centroid of the largest (main) contour for piece labeling
+    const mainContour = simplified.reduce((best, c) =>
+      Math.abs(polygonArea(c)) > Math.abs(polygonArea(best)) ? c : best
+    );
+    const centroid = mainContour.length >= 3 ? polygonCentroid(mainContour) : null;
+
     polygonRegions.push({
       colorIdx: region.colorIdx,
       contours: simplified,
+      insetContours,
+      centroid,
       cellCount: region.cells.length,
     });
   }
 
-  // 7. Build SVG strings
+  // 8. Assign piece numbers (largest piece = #1)
+  const sortedForNumbering = [...polygonRegions].sort((a, b) => {
+    const areaA = a.contours.reduce((s, c) => s + Math.abs(polygonArea(c)), 0);
+    const areaB = b.contours.reduce((s, c) => s + Math.abs(polygonArea(c)), 0);
+    return areaB - areaA;
+  });
+  sortedForNumbering.forEach((r, i) => { r.pieceNumber = i + 1; });
+
+  // 9. Assign color letters (A, B, C, ...) to palette entries
+  const colorLetters = palette.map((_, i) =>
+    i < 26 ? String.fromCharCode(65 + i) : `A${i - 25}`
+  );
+
+  // 10. Build SVG strings (with piece number labels)
   const svgColored = buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, false);
   const svgOutline = buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, true);
 
-  // 8. Convert SVG to canvas for preview and PDF export
+  // 11. Convert SVG to canvas for preview and raster export
   const patternCanvas = await svgToCanvas(svgColored, pxW, pxH);
   const outlineCanvas = await svgToCanvas(svgOutline, pxW, pxH);
 
-  // 9. Calculate material estimates from polygon geometry
-  const estimates = calculatePolygonEstimates(polygonRegions, palette, settings, pxW, pxH, DPI);
+  // 12. Material estimates
+  const estimates = calculatePolygonEstimates(polygonRegions, palette, colorLetters, settings, pxW, pxH);
 
   return {
     patternCanvas,
@@ -592,6 +815,8 @@ export async function processImage(imageFile, settings) {
     svgOutline,
     estimates,
     palette,
+    colorLetters,
+    polygonRegions,
     pxW,
     pxH,
     DPI,

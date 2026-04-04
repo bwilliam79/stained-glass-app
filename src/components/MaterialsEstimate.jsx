@@ -30,7 +30,7 @@ export default function MaterialsEstimate({ estimates }) {
         <EstimateRow label="Perimeter Lead Came (U-channel)" value={estimates.perimeterCame.value} unit={estimates.perimeterCame.unit} />
         <EstimateRow label="Total Came" value={estimates.cameLength.value} unit={estimates.cameLength.unit} accent />
         <EstimateRow label="Solder (50/50)" value={estimates.solderWeight.value} unit={estimates.solderWeight.unit} accent />
-        <EstimateRow label="Number of Glass Colors" value={estimates.numPieces} unit="colors" />
+        <EstimateRow label="Number of Glass Pieces" value={estimates.numPieces} unit="pieces" />
       </div>
 
       <div>
@@ -44,7 +44,7 @@ export default function MaterialsEstimate({ estimates }) {
               />
               <div className="flex-1">
                 <div className="flex justify-between text-xs mb-1">
-                  <span className="text-gray-700 font-medium">Color {i + 1}</span>
+                  <span className="text-gray-700 font-medium">Color {c.colorLetter || String.fromCharCode(65 + i)}</span>
                   <span className="text-gray-600">
                     {c.areaSqFt.toFixed(3)} ft² &nbsp;·&nbsp; {c.areaIn.toFixed(1)} in²
                   </span>

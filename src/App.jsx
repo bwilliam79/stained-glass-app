@@ -15,6 +15,7 @@ const DEFAULT_SETTINGS = {
   blurRadius: 4,
   lineThickness: 4,
   wastePercent: 15,
+  cameWidth: 0.1875, // 3/16" — standard came heart width
 };
 
 export default function App() {

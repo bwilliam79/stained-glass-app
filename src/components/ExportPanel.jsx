@@ -1,5 +1,11 @@
 import { useState } from 'react';
-import { exportColoredPDF, exportOutlinePDF, exportPNG, exportSVG } from '../utils/pdfExporter.js';
+import {
+  exportColoredPDF,
+  exportOutlinePDF,
+  exportPNG,
+  exportSVG,
+  exportPieceTemplates,
+} from '../utils/pdfExporter.js';
 
 function ExportButton({ label, description, icon, onClick, disabled, loading }) {
   return (
@@ -40,6 +46,21 @@ export default function ExportPanel({ result, settings }) {
 
       <div className="space-y-2">
         <ExportButton
+          icon="🔢"
+          label="Piece Templates (PDF)"
+          description={`Individual cut templates for all ${result?.estimates?.numPieces ?? ''} pieces, numbered A–Z and sized for actual glass cutting (came-compensated).`}
+          loading={loading === 'templates'}
+          disabled={disabled || !result?.polygonRegions}
+          onClick={() => run('templates', () => exportPieceTemplates(
+            result.polygonRegions,
+            result.palette,
+            result.colorLetters,
+            settings,
+            result.pxW,
+          ))}
+        />
+
+        <ExportButton
           icon="🖨️"
           label="Print Colored Pattern (PDF)"
           description="Full-color PDF at actual size. Tiled across pages if larger than letter."
@@ -51,7 +72,7 @@ export default function ExportPanel({ result, settings }) {
         <ExportButton
           icon="✂️"
           label="Print Cutting Guide (PDF)"
-          description="Black-on-white outlines only — perfect for tracing and cutting glass."
+          description="Black-on-white outlines with piece numbers — lay flat under glass to trace."
           loading={loading === 'pdf-outline'}
           disabled={disabled}
           onClick={() => run('pdf-outline', () => exportOutlinePDF(result.outlineCanvas, settings))}
@@ -98,6 +119,7 @@ export default function ExportPanel({ result, settings }) {
         <div className="mt-4 p-3 bg-gray-50 rounded-lg text-xs text-gray-600 space-y-1">
           <p><strong>Print tip:</strong> Set printer scale to 100% (actual size) — do not scale to fit.</p>
           <p>For large pieces, tape tiled pages together using the registration marks at each corner.</p>
+          <p>Piece templates already account for your came width — trace and cut as shown.</p>
         </div>
       )}
     </div>

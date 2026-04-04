@@ -19,6 +19,19 @@ function Slider({ label, hint, min, max, step = 1, value, onChange }) {
   );
 }
 
+const CAME_OPTIONS = [
+  { value: 0.0625,  label: '1/16"', desc: 'very fine, decorative' },
+  { value: 0.09375, label: '3/32"', desc: 'thin came' },
+  { value: 0.125,   label: '1/8"',  desc: 'standard thin' },
+  { value: 0.1875,  label: '3/16"', desc: 'standard (most common)' },
+  { value: 0.25,    label: '1/4"',  desc: 'heavy came' },
+];
+
+function cameLabel(val) {
+  const opt = CAME_OPTIONS.find(o => Math.abs(o.value - val) < 0.001);
+  return opt ? opt.label : `${val}"`;
+}
+
 export default function PatternSettings({ settings, onChange }) {
   return (
     <div className="panel">
@@ -44,12 +57,34 @@ export default function PatternSettings({ settings, onChange }) {
 
       <Slider
         label="Lead Line Width"
-        hint="Thickness of lead came lines in the pattern."
+        hint="Thickness of lead came lines in the pattern display."
         min={1}
         max={12}
         value={settings.lineThickness}
         onChange={v => onChange({ lineThickness: v })}
       />
+
+      {/* Came Heart Width */}
+      <div className="mb-4">
+        <div className="flex justify-between mb-1">
+          <label className="label mb-0">Came Heart Width</label>
+          <span className="text-sm font-semibold text-amber-700">{cameLabel(settings.cameWidth)}</span>
+        </div>
+        <select
+          value={settings.cameWidth}
+          onChange={e => onChange({ cameWidth: parseFloat(e.target.value) })}
+          className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-400"
+        >
+          {CAME_OPTIONS.map(opt => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label} — {opt.desc}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-gray-500 mt-1">
+          Heart width used to inset each piece template so assembled work matches target size.
+        </p>
+      </div>
 
       <div className="mb-0">
         <div className="flex justify-between mb-1">
