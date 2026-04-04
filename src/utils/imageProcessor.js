@@ -374,6 +374,8 @@ function buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, outlineOnly)
   // Draw a white background
   paths += `<rect x="0" y="0" width="${pxW}" height="${pxH}" fill="${outlineOnly ? 'white' : '#f5f5f5'}" />\n`;
 
+  // Pass 1: Draw fills with a fill-colored stroke to eliminate anti-aliasing gaps
+  // The slightly wider fill-colored stroke creates overlap between adjacent regions
   for (const region of polygonRegions) {
     const [r, g, b] = palette[region.colorIdx];
     const fill = outlineOnly ? 'white' : `rgb(${r},${g},${b})`;
@@ -381,7 +383,17 @@ function buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, outlineOnly)
     for (const contour of region.contours) {
       const d = contourToSVGPath(contour);
       if (d) {
-        paths += `  <path d="${d}" fill="${fill}" stroke="#1a1a1a" stroke-width="${strokeW}" stroke-linejoin="round" />\n`;
+        paths += `  <path d="${d}" fill="${fill}" stroke="${fill}" stroke-width="${strokeW + 2}" stroke-linejoin="round" />\n`;
+      }
+    }
+  }
+
+  // Pass 2: Draw the visible outlines on top
+  for (const region of polygonRegions) {
+    for (const contour of region.contours) {
+      const d = contourToSVGPath(contour);
+      if (d) {
+        paths += `  <path d="${d}" fill="none" stroke="#1a1a1a" stroke-width="${strokeW}" stroke-linejoin="round" />\n`;
       }
     }
   }
@@ -522,7 +534,7 @@ export async function processImage(imageFile, settings) {
   workCanvas.width = pxW;
   workCanvas.height = pxH;
   const ctx = workCanvas.getContext('2d');
-  const blurPx = Math.round(blurRadius * 6);
+  const blurPx = Math.round(blurRadius * 2);
   if (blurPx > 0) ctx.filter = `blur(${blurPx}px)`;
   ctx.drawImage(bitmap, 0, 0, pxW, pxH);
   ctx.filter = 'none';
@@ -533,7 +545,7 @@ export async function processImage(imageFile, settings) {
   const quantPixels = applyPaletteToPixels(blurredData.data, pxW * pxH, palette);
 
   // 3. Create cell grid — fine grid for good contour fidelity
-  const cellSize = Math.max(2, Math.round(2 + blurRadius * 0.8));
+  const cellSize = Math.max(2, Math.round(2 + blurRadius * 0.3));
   const gridW = Math.ceil(pxW / cellSize);
   const gridH = Math.ceil(pxH / cellSize);
   const grid = createCellGrid(quantPixels, pxW, pxH, gridW, gridH, cellSize, palette);
@@ -542,14 +554,14 @@ export async function processImage(imageFile, settings) {
   const { labels, regions } = findConnectedRegions(grid, gridW, gridH);
 
   // 5. Merge only truly tiny regions (noise fragments), preserve design features
-  const minCells = Math.max(3, Math.round(5 + blurRadius * 3));
+  const minCells = Math.max(3, Math.round(5 + blurRadius * 1));
   mergeSmallRegions(labels, regions, grid, gridW, gridH, minCells);
   const activeRegions = regions.filter(r => r.cells.length > 0);
 
-  // 6. Extract polygon contours — moderate DP simplification
+  // 6. Extract polygon contours — gentle DP simplification
   // Smooths staircase edges into straight lines while preserving shape detail
   const minDim = Math.min(pxW, pxH);
-  const dpTolerance = minDim * (0.008 + blurRadius * 0.002);
+  const dpTolerance = minDim * (0.006 + blurRadius * 0.001);
   const polygonRegions = [];
 
   for (const region of activeRegions) {
