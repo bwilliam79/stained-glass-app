@@ -533,7 +533,7 @@ export async function processImage(imageFile, settings) {
   const quantPixels = applyPaletteToPixels(blurredData.data, pxW * pxH, palette);
 
   // 3. Create cell grid — fine grid for good contour fidelity
-  const cellSize = Math.max(2, Math.round(2 + blurRadius));
+  const cellSize = Math.max(2, Math.round(2 + blurRadius * 0.8));
   const gridW = Math.ceil(pxW / cellSize);
   const gridH = Math.ceil(pxH / cellSize);
   const grid = createCellGrid(quantPixels, pxW, pxH, gridW, gridH, cellSize, palette);
@@ -541,16 +541,15 @@ export async function processImage(imageFile, settings) {
   // 4. Find connected regions via flood fill
   const { labels, regions } = findConnectedRegions(grid, gridW, gridH);
 
-  // 5. Merge tiny regions — minimum piece ~0.3-1.0 sq inches depending on simplification
-  const minAreaPx = (0.3 + blurRadius * 0.08) * DPI * DPI;
-  const minCells = Math.max(3, Math.round(minAreaPx / (cellSize * cellSize)));
+  // 5. Merge only truly tiny regions (noise fragments), preserve design features
+  const minCells = Math.max(3, Math.round(5 + blurRadius * 3));
   mergeSmallRegions(labels, regions, grid, gridW, gridH, minCells);
   const activeRegions = regions.filter(r => r.cells.length > 0);
 
-  // 6. Extract polygon contours — aggressive DP simplification for cuttable glass pieces
-  // Tolerance scales with image size so edges are smooth at any dimension
+  // 6. Extract polygon contours — moderate DP simplification
+  // Smooths staircase edges into straight lines while preserving shape detail
   const minDim = Math.min(pxW, pxH);
-  const dpTolerance = minDim * (0.02 + blurRadius * 0.004);
+  const dpTolerance = minDim * (0.008 + blurRadius * 0.002);
   const polygonRegions = [];
 
   for (const region of activeRegions) {
