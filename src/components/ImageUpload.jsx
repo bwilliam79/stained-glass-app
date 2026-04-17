@@ -3,11 +3,27 @@ import { useRef, useState } from 'react';
 export default function ImageUpload({ imageUrl, onImageSelected }) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
+  const [validationError, setValidationError] = useState(null);
 
-  function handleFile(file) {
-    if (file && file.type.startsWith('image/')) {
-      onImageSelected(file);
+  async function handleFile(file) {
+    setValidationError(null);
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setValidationError('Please choose an image file (PNG, JPG, WebP, or GIF).');
+      return;
     }
+    // Verify it's a real, decodable image — MIME type alone can be spoofed or
+    // missing (e.g. on some drag-drop sources).
+    let bitmap = null;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch (err) {
+      setValidationError('That file does not appear to be a valid image.');
+      return;
+    } finally {
+      if (bitmap && typeof bitmap.close === 'function') bitmap.close();
+    }
+    onImageSelected(file);
   }
 
   function handleDrop(e) {
@@ -67,6 +83,10 @@ export default function ImageUpload({ imageUrl, onImageSelected }) {
         <p className="text-xs text-gray-500 mt-2 text-center">
           Click the image to replace it
         </p>
+      )}
+
+      {validationError && (
+        <p className="text-xs text-red-600 mt-2 text-center">{validationError}</p>
       )}
     </div>
   );

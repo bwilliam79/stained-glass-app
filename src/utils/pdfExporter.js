@@ -59,6 +59,10 @@ export async function exportOutlinePDF(outlineCanvas, settings) {
 }
 
 async function generatePDF(canvas, artWIn, artHIn, title, filename) {
+  if (!canvas || !canvas.width || !canvas.height) {
+    throw new Error('exportPDF: source canvas has zero width or height; nothing to export.');
+  }
+
   const pdf = new jsPDF({ orientation: 'portrait', unit: 'in', format: 'letter' });
 
   if (artWIn <= PRINT_W && artHIn <= PRINT_H) {
@@ -98,10 +102,16 @@ async function generatePDF(canvas, artWIn, artHIn, title, filename) {
         const srcW = Math.min(PRINT_W, artWIn - srcX);
         const srcH = Math.min(PRINT_H, artHIn - srcY);
 
+        // Validate the source canvas — a zero-dimension canvas would cause
+        // drawImage to throw with a confusing "source width is 0" error.
+        if (!canvas || !canvas.width || !canvas.height) {
+          throw new Error('exportPDF: source canvas has zero width or height; cannot tile.');
+        }
+
         const tileCanvas = document.createElement('canvas');
         const scaleFactor = canvas.width / artWIn;
-        tileCanvas.width = Math.round(srcW * scaleFactor);
-        tileCanvas.height = Math.round(srcH * scaleFactor);
+        tileCanvas.width = Math.max(1, Math.round(srcW * scaleFactor));
+        tileCanvas.height = Math.max(1, Math.round(srcH * scaleFactor));
         const tileCtx = tileCanvas.getContext('2d');
         tileCtx.drawImage(
           canvas,

@@ -28,7 +28,10 @@ function kMeansQuantize(data, numPixels, k) {
       samples.push([data[idx], data[idx + 1], data[idx + 2]]);
     }
   }
-  if (samples.length === 0) return [[128, 128, 128]];
+  if (samples.length === 0) {
+    console.warn('kMeansQuantize: no opaque samples found; returning gray fallback palette.');
+    return [[128, 128, 128]];
+  }
 
   let centroids = initKMeansPP(samples, Math.min(k, samples.length));
   const n = centroids.length;
@@ -130,11 +133,14 @@ function findConnectedRegions(grid, gridW, gridH) {
     const colorIdx = grid[i];
     const label = nextLabel++;
     const cells = [];
+    // BFS via an index pointer: avoids the array-length ceiling that DFS can
+    // hit on very large uniform regions and keeps shift amortized O(1).
     const queue = [i];
+    let qHead = 0;
     labels[i] = label;
 
-    while (queue.length > 0) {
-      const ci = queue.pop();
+    while (qHead < queue.length) {
+      const ci = queue[qHead++];
       cells.push(ci);
       const cx = ci % gridW;
       const cy = (ci - cx) / gridW;
@@ -178,15 +184,19 @@ function mergeSmallRegions(labels, regions, grid, gridW, gridH, minCells) {
 
       let bestNeighbor = -1, bestCount = 0;
       for (const [nl, count] of Object.entries(neighborCounts)) {
-        if (parseInt(count) > bestCount) {
-          bestCount = parseInt(count);
-          bestNeighbor = parseInt(nl);
+        const c = parseInt(count);
+        const lbl = parseInt(nl);
+        if (Number.isFinite(c) && Number.isFinite(lbl) && c > bestCount) {
+          bestCount = c;
+          bestNeighbor = lbl;
         }
       }
+      // Defensive: if no valid neighbor was found, skip rather than dereference
+      // a missing target below.
       if (bestNeighbor < 0) continue;
 
       const target = regions.find(r => r.label === bestNeighbor);
-      if (!target) continue;
+      if (!target || target.colorIdx == null) continue;
 
       for (const ci of region.cells) {
         labels[ci] = bestNeighbor;
@@ -339,11 +349,31 @@ function extractRegionContours(labels, gridW, gridH, regionLabel, cellSize, pxW,
       }
 
       if (contour.length >= 3) {
-        const pxContour = contour.map(([gx, gy]) => [
+        // Map grid vertices back to pixel space. Clamp to the image rectangle
+        // since the last row/column of cells can extend beyond pxW/pxH when
+        // pxW/pxH is not an integer multiple of cellSize.
+        const mapped = contour.map(([gx, gy]) => [
           Math.min(gx * cellSize, pxW),
           Math.min(gy * cellSize, pxH),
         ]);
-        contours.push(pxContour);
+        // Drop consecutive duplicates created by the clamp — they produce
+        // zero-length edges that break downstream simplification/inset math.
+        const pxContour = [];
+        for (let i = 0; i < mapped.length; i++) {
+          const prev = pxContour[pxContour.length - 1];
+          if (!prev || prev[0] !== mapped[i][0] || prev[1] !== mapped[i][1]) {
+            pxContour.push(mapped[i]);
+          }
+        }
+        // Remove trailing duplicate of the first vertex (closed polygon).
+        if (
+          pxContour.length >= 2 &&
+          pxContour[0][0] === pxContour[pxContour.length - 1][0] &&
+          pxContour[0][1] === pxContour[pxContour.length - 1][1]
+        ) {
+          pxContour.pop();
+        }
+        if (pxContour.length >= 3) contours.push(pxContour);
       }
     }
   }
@@ -393,9 +423,15 @@ function douglasPeucker(points, tolerance) {
 }
 
 function simplifyClosedContour(points, tolerance) {
-  if (points.length <= 4) return points;
+  // Too short to simplify usefully — return a defensive copy so downstream
+  // mutation (fixAcuteAngles, insetPolygon, etc.) can't alias the input.
+  if (points.length <= 4) return points.slice();
 
-  let bestDist = 0, splitA = 0, splitB = 0;
+  // Seed splits so they are always defined, even if the search below doesn't
+  // find a pair with bestDist > 0 (e.g. a degenerate all-coincident contour).
+  let bestDist = 0;
+  let splitA = 0;
+  let splitB = Math.floor(points.length / 2);
   const step = Math.max(1, Math.floor(points.length / 50));
   for (let i = 0; i < points.length; i += step) {
     for (let j = i + Math.floor(points.length / 4); j < points.length; j += step) {
@@ -404,6 +440,10 @@ function simplifyClosedContour(points, tolerance) {
     }
   }
 
+  // If we never found any spread between candidate splits, simplification
+  // can't do better than the original. Return a copy to keep callers safe.
+  if (bestDist === 0) return points.slice();
+
   const half1 = points.slice(splitA, splitB + 1);
   const half2 = [...points.slice(splitB), ...points.slice(0, splitA + 1)];
 
@@ -411,7 +451,7 @@ function simplifyClosedContour(points, tolerance) {
   const s2 = douglasPeucker(half2, tolerance);
 
   const result = [...s1.slice(0, -1), ...s2.slice(0, -1)];
-  return result.length >= 3 ? result : points;
+  return result.length >= 3 ? result : points.slice();
 }
 
 // ─── Fix Acute Angles ─────────────────────────────────────────────────────────
@@ -592,26 +632,53 @@ function buildSVG(polygonRegions, palette, pxW, pxH, lineThickness, outlineOnly)
 // ─── SVG to Canvas ────────────────────────────────────────────────────────────
 
 function svgToCanvas(svgString, width, height) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const img = new Image();
     const blob = new Blob([svgString], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
+    let settled = false;
+
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      clearTimeout(timer);
+      img.onload = null;
+      img.onerror = null;
+    };
+
+    // If the SVG never decodes (malformed, huge, sandbox refusal, etc.) we
+    // must not hang the caller forever. 10s is well beyond normal decode.
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('svgToCanvas: timed out after 10s decoding SVG.'));
+    }, 10000);
+
     img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, width, height);
-      URL.revokeObjectURL(url);
-      resolve(canvas);
+      if (settled) return;
+      settled = true;
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        cleanup();
+        resolve(canvas);
+      } catch (err) {
+        cleanup();
+        reject(new Error(`svgToCanvas: drawImage failed — ${err && err.message ? err.message : err}`));
+      }
     };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      resolve(canvas);
+
+    img.onerror = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const detail = err && err.message ? err.message : 'image failed to decode';
+      reject(new Error(`svgToCanvas: ${detail}`));
     };
+
     img.src = url;
   });
 }
@@ -684,6 +751,21 @@ function calculatePolygonEstimates(polygonRegions, palette, colorLetters, settin
   const totalGlassSqFt = glassByColor.reduce((s, c) => s + c.areaSqFt, 0);
 
   const totalPerimIn = totalInteriorPerimPx * pxToIn;
+  // Interior came estimate.
+  //
+  // ASSUMPTION: no holes — i.e. every region is a simple (possibly concave)
+  // polygon with a single outer boundary and no inner boundaries. We sum all
+  // contour perimeters, subtract the overall rectangle perimeter, then halve
+  // the remainder because every interior edge is shared by exactly two pieces
+  // and was therefore counted twice.
+  //
+  // This overestimates came length when a region has holes: a hole contributes
+  // its perimeter once per piece instead of twice (it's shared with the
+  // neighbouring region on only one side). The current contour extractor
+  // emits each region's outer boundary and any interior boundaries
+  // undistinguished, so we cannot separate them here without a hierarchy
+  // pass. Until hole detection lands, treat this figure as an upper bound
+  // for any pattern containing ring-shaped regions.
   const interiorCameIn = (totalPerimIn - perimeterIn) / 2;
   const cameLengthIn = interiorCameIn + perimeterIn;
   const cameLengthFt = cameLengthIn / 12;

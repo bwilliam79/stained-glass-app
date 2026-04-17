@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import DimensionsPanel from './components/DimensionsPanel.jsx';
 import ImageUpload from './components/ImageUpload.jsx';
 import PatternSettings from './components/PatternSettings.jsx';
@@ -26,14 +26,32 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState('');
+  const imageUrlRef = useRef(null);
 
   const updateSettings = useCallback((patch) => {
     setSettings(prev => ({ ...prev, ...patch }));
   }, []);
 
+  // Revoke any outstanding blob URL on unmount so we don't leak memory.
+  useEffect(() => {
+    return () => {
+      if (imageUrlRef.current) {
+        URL.revokeObjectURL(imageUrlRef.current);
+        imageUrlRef.current = null;
+      }
+    };
+  }, []);
+
   function handleImageSelected(file) {
+    // Revoke the previous blob URL before creating a new one.
+    if (imageUrlRef.current) {
+      URL.revokeObjectURL(imageUrlRef.current);
+      imageUrlRef.current = null;
+    }
+    const url = URL.createObjectURL(file);
+    imageUrlRef.current = url;
     setImageFile(file);
-    setImageUrl(URL.createObjectURL(file));
+    setImageUrl(url);
     setResult(null);
     setError(null);
   }
@@ -61,6 +79,13 @@ export default function App() {
     } catch (err) {
       console.error(err);
       setError(`Processing failed: ${err.message}`);
+      // Clear the stale image so the user can recover cleanly.
+      if (imageUrlRef.current) {
+        URL.revokeObjectURL(imageUrlRef.current);
+        imageUrlRef.current = null;
+      }
+      setImageUrl(null);
+      setImageFile(null);
     } finally {
       setProcessing(false);
       setProgress('');

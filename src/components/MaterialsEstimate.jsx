@@ -68,7 +68,7 @@ export default function MaterialsEstimate({ estimates }) {
       </div>
 
       <div className="mt-4 p-3 bg-blue-50 rounded-lg text-xs text-blue-800 space-y-1">
-        <p><strong>Note:</strong> Estimates include your {estimates.glassByColor.reduce ? '' : ''}waste factor.</p>
+        <p><strong>Note:</strong> Estimates include your waste factor.</p>
         <p>Buy came in standard 6-foot lengths. Solder is 50/50 tin/lead.</p>
         <p>Always purchase 10–15% extra to account for variations.</p>
       </div>
