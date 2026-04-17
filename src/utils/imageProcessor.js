@@ -132,16 +132,14 @@ function findConnectedRegions(grid, gridW, gridH) {
     if (labels[i] >= 0) continue;
     const colorIdx = grid[i];
     const label = nextLabel++;
-    const cells = [];
-    // BFS via an index pointer: avoids the array-length ceiling that DFS can
-    // hit on very large uniform regions and keeps shift amortized O(1).
-    const queue = [i];
+    // BFS reuses `cells` as its own queue via an index pointer — avoids a
+    // parallel queue array that doubles memory on large uniform regions.
+    const cells = [i];
     let qHead = 0;
     labels[i] = label;
 
-    while (qHead < queue.length) {
-      const ci = queue[qHead++];
-      cells.push(ci);
+    while (qHead < cells.length) {
+      const ci = cells[qHead++];
       const cx = ci % gridW;
       const cy = (ci - cx) / gridW;
       for (const [nx, ny] of [[cx - 1, cy], [cx + 1, cy], [cx, cy - 1], [cx, cy + 1]]) {
@@ -149,7 +147,7 @@ function findConnectedRegions(grid, gridW, gridH) {
           const ni = ny * gridW + nx;
           if (labels[ni] < 0 && grid[ni] === colorIdx) {
             labels[ni] = label;
-            queue.push(ni);
+            cells.push(ni);
           }
         }
       }
